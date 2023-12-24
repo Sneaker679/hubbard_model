@@ -1,4 +1,5 @@
 import numpy as np
+import bisect
 import time
 import copy
 
@@ -16,13 +17,47 @@ class hubbard:
         self._mu = mu
         self._hopping_matrix = hopping_matrix
 
-        self._blocks = self.__calculate_blocks()
-        self._gs_blocks = self.__find_gs()
+        self._bank = [state for state in range(2**(2*N))]
 
+        # The index for this list corresponds to the number of electrons.
+        # For example, the first element corresponds to all blocks that have one electron.
+        self._blocks = []
+        for n in range(2 * N + 1):
+            self._blocks.append([])
+
+        # Calculated only if self.calculate_all_blocks() is ran.
+        self._gs_blocks = None
+        self._gs_energy = None
+
+    # This function is ran by another function called self.calculate_all_blocks().
+    # It proceeds to scan all the calculated blocks, and finds the blocks with the lowest energy.
+    def __find_gs(self):
+        self._gs_energy = self._blocks[0][0]._energy
+        self._gs_blocks = [self._blocks[0][0]]
+
+        # Finding gs_blocks
+        for NIndex, block_group in enumerate(self._blocks):
+            for SpinIndex, block in enumerate(block_group):
+
+                if np.abs(block._energy - self._gs_energy) < 0.001:
+                    self._gs_blocks.append(block)
+
+                elif block._energy < self._gs_energy:
+                    self._gs_energy = block._energy
+                    self._gs_blocks.clear()
+                    self._gs_blocks.append(block)
+        
+        # Sorting by spin value
+        if not len(self._gs_blocks) == 1:
+            self._gs_blocks.sort(key = lambda b: b._total_spin) 
+
+    # Calculates all the states of a block, starting from an initial_state, and returns
+    # all associations made. These will correspond the indexes of "t" in the hubbard hamiltonian.
     def __calculate_associations(self, initial_state : fock_state):
         block_states = [initial_state]
         associations = []
         
+        # Calculation is derived from the fermi-hubbard hamiltonian formula.
         for state in block_states:
             for i, j in np.ndindex( (self._N, self._N,) ):
                 for spin in ['+','-']:
@@ -40,54 +75,65 @@ class hubbard:
                                 new_block_state._sign = 1
                                 block_states.append(new_block_state)
         
+        # To prevent the code from crashing, the block is of size 1x1, then
+        # we return an association with itself, for example, (0,0) or (1,1)...
         if not associations:
             associations.append((initial_state,initial_state))
             
         return associations
 
-    def __calculate_blocks(self):
-        bank = [state for state in range(2**(2*self._N))]
-        blocks = [] * (self._N * 2 + 1) 
-        while bank:
-            initial_state = fock_state(self._N, bank[0])
-            associations = self.__calculate_associations(initial_state)
-            new_block = block(associations, self._t, self._U, self._mu, self._hopping_matrix) 
-            blocks.append(new_block)
+    # Calculates a block by giving it the initial state it needs to start calculating.
+    # Updates the object's attributes accordingly.
+    def __calculate_block_from_init_state(self, initial_state : fock_state):
+        associations = self.__calculate_associations(initial_state)
+        new_block = block(associations, self._t, self._U, self._mu, self._hopping_matrix) 
+        bisect.insort(
+            self._blocks[new_block._num_electrons],
+            new_block,
+            key = lambda block : block._total_spin)
 
-            to_remove = [state._state for state in blocks[-1]._states]
-            for state in to_remove:
-                bank.remove(state)
-        
-        blocks_Nsorted = []
-        for n in range(2 * self._N + 1):
-            blocks_Nsorted.append( [block for block in blocks if block._num_electrons == n] )
+        to_remove = [state._state for state in new_block._states]
+        for state in to_remove:
+            self._bank.remove(state)
 
-        key = lambda block : block._total_spin
-        for group_index in range(2 * self._N):
-            blocks_Nsorted[group_index].sort(key = key)
-
-        return blocks_Nsorted
+    # Public method allowing user to calculate one specific bloc by feeding it the number of electrons
+    # and the total spin.
+    def calculate_block(self, N_electrons, spin):
+        # Checking if paramters make for a possible block
+        if not (N_electrons % 2) == (spin % 2):
+            print("Impossible block. Skipping instruction.")
+            return
             
-    def __find_gs(self):
-        gs_energy = self._blocks[0][0]._energy
-        gs_blocks = [self._blocks[0][0]]
+        # Checks if block is already calculated
+        for spin_index, block in enumerate(self._blocks[N_electrons]):
+            if block._total_spin == spin:
+                return
 
-        for NIndex, block_group in enumerate(self._blocks):
-            for SpinIndex, block in enumerate(block_group):
+        # Finds the first state that has these paramters as attributes
+        found = False
+        for num in self._bank:
+            initial_state = fock_state(self._N, num)
+            if initial_state._num_electrons == N_electrons and initial_state._total_spin == spin:
+                found = True
+                break
 
-                if np.abs(block._energy - gs_energy) < 0.001:
-                    gs_blocks.append(block)
+        # If this state is not found, then the block doesn't exist.
+        # If found, then calculates the block with the first state.
+        if not found:
+            print("Impossible block. Skipping instruction.")
+            return
 
-                elif block._energy < gs_energy:
-                    gs_energy = block._energy
-                    gs_blocks.clear()
-                    gs_blocks.append(block)
-        
-        if not len(gs_blocks) == 1:
-            gs_blocks.sort(key = lambda b: b._total_spin) 
+        else: 
+            self.__calculate_block_from_init_state(initial_state)
 
-        return gs_blocks
-
+    # Calculates all blocks and finds the ground state by calling __find_gs()
+    def calculate_all_blocks(self):
+        while self._bank:
+            initial_state = fock_state(self._N, self._bank[0])
+            self.__calculate_block_from_init_state(initial_state)
+        self.__find_gs()
+            
+    # Getter for one block
     def get_block(self, num_electrons : int, spin : int):
         try:
             block_spin_index = None
@@ -101,6 +147,7 @@ class hubbard:
         except (IndexError, TypeError):
             return None
             
+    # Getter for one of the ground block(s)
     def get_gs_block(self, spin : int):
         try:
             block_spin_index = None
@@ -123,24 +170,15 @@ class hubbard:
     def __repr__(self):
         string = ''
         i = 0
-
         for block_group in self._blocks:
             for block in block_group:
                 string += f">>>BLOCK #{i}<<<\n"
                 string += str(block) + "\n\n"
                 i += 1
 
+        if not self._gs_energy is None:
+            string += f"Ground state energy : {self._gs_energy}.\nThese blocks are part of the GS:\n"
+            for block in self._gs_blocks:
+                string += f"\tN:{block._num_electrons}/S:{block._total_spin}\n"
+
         return string
-
-if __name__ == "__main__":
-    start = time.time()
-    result = hubbard(N = 2, t = -1, U = 4, mu = 2, hopping_matrix = hopping_matrix(1,2))
-    end = time.time()
-    print(f"Time : {end - start} seconds.")
-
-    try:
-        import resource
-        print(f"Max Memory Usage : {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1000} megabytes.")
-    except ModuleNotFoundError:
-        pass
-
